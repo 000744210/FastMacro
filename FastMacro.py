@@ -1,5 +1,6 @@
 import ctypes
 import os
+import sys
 import queue
 import random
 import threading
@@ -494,10 +495,44 @@ def sleep_spin(duration_ms: float, stop_event=None) -> None:
 # App
 # ----------------------------------------------------------------------
 
+# takes the current executable path and makes it so all mcr files open using it.
+# This keeps the executable portable with the feature an installer would have.
+def register_mcr_filetype():
+
+    try:
+        import winreg
+        
+        
+        exe_path = os.path.abspath(sys.argv[0])
+        if not exe_path[-3:] == "exe":
+            return 0 # running in python mode. skip
+        # .mcr -> FastMacroFile
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\.mcr") as key:
+            winreg.SetValue(key, "", winreg.REG_SZ, "FastMacroFile")
+
+        # FastMacroFile description
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\FastMacroFile") as key:
+            winreg.SetValue(key, "", winreg.REG_SZ, "FastMacro Macro File")
+
+        # Open command
+        with winreg.CreateKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Classes\FastMacroFile\shell\open\command"
+        ) as key:
+            command = f'"{exe_path}" "%1"'
+            winreg.SetValue(key, "", winreg.REG_SZ, command)
+
+        print(".mcr association registered.")
+
+    except Exception as e:
+        print("Failed to register file type:", e)
+
+
+
 # not a virus payload. Used to embed an app icon in the application.
 appIcon = "iVBORw0KGgoAAAANSUhEUgAAADIAAAAyCAMAAAAp4XiDAAAAQlBMVEUAAAAYIjcaJjcdKT0VITQTHjAQGiz09fjN2eKhtcRJvvd/h5MdpPxTlLkcg8pOYnYeZpkyQFIVQ2kXJjwUIDUOGitxQC95AAAAB3RSTlMAGUhcl9Df9+2+tgAAAgpJREFUeNqlltGSqyAQRNeouyAKDD3z/796ZyJriMbkWntSFD5w7J6iUsnXX+hu/Rtu3UG4DSPeMg6354QBzPjE0DXGyAY+MXZXDfCWM3Dlg6D0NeSbN4DNa97BUNio1Xr+L8CPmJEvMNThNyithB0JXBm73Sh5mrx3zv3s8AflmLJTAr9WQBt7hV4riJPyspjHiVKyoa2q4RJVwCfFRLFyqSpBNs4UBmPxfqtFv8eJzhQAnJYlBL/2qlfCWKaF5Ki0kGtHZ5qUdFAEOca4KN77xrCJymRkSKPIs/LzRJI83YmlVYym1u5K4lTJjbJh09eUQHcgiPPKFLFXAF6mbRKSSpkrsQjLIYUBrMUcdkosLEqjoBhJCe756vNsZIjslBKVadruPm3Bce0kB4WLQaQZz70Qa6e9YqBRvDwU63Si5PlRLEnLqVLs2xLuJHxSLtAolFIiqTCECzS3vFO88z4xWGwFz2XOYgu8voFZgCcFLhDI+0BeVedSmSPinHOMpejK8f7YKuScCzq7C7qRS6wHsh3NuhW1cjGvVZKzkOA92XIksagQ8/0DVVAi59wqwVtS8EGNoA+IyLlmRJMZuuFXGUXW0YgAJrKHdWIwAEFhhtgmqnwZg1xguCv9BYNv9df12uUbPV8KuTQN91Uwh68ZRj9+FkZt1dL1w/h9zjgOffd1oHvLn/64/QNKeoVd0OWtkAAAAABJRU5ErkJggg=="
 class MacroRecorderApp:
-    def __init__(self) -> None:
+    def __init__(self,opened_file) -> None:
         self.root = tk.Tk()
         self.root.overrideredirect(True)
         self.root.title("Macro Recorder")
@@ -535,13 +570,32 @@ class MacroRecorderApp:
         self._keyboard_proc_ref = LowLevelKeyboardProc(self._keyboard_proc)
         self._mouse_proc_ref = LowLevelMouseProc(self._mouse_proc)
 
+
+        
+        state = AppStateManager("FastMacro.ini")
+        self.state = state
+        self.recent_files = state.get_list("core","recent_files",fallback=[])
+        self.loop_replay = state.get_int("core","loop_active",fallback=0)
+        self.repeat_count = state.get("core","repeat_count",fallback="1")
+        self.speed_index = state.get_int("core","speed_index",fallback=4) # 4 = x1 speed
+        
+        self.record_mouse_inputs = state.get_int("settings","record_mouse_inputs",fallback=1)
+        self.record_keyboard_inputs = state.get_int("settings","record_keyboard_inputs",fallback=1)
+        self.use_touch_api = state.get_int("settings","use_touch_api",fallback=0)
+        self.minimize_on_run = state.get_int("settings","minimize_on_run", fallback=0)
+        
         self._build_ui()
         
         self._start_hook_thread()
         self._schedule_queue_pump()
         self._schedule_refresh()
+        
+        if opened_file:
+            self.actions = self.parse_file(opened_file)
+            self._add_recent(opened_file)
+        
         self.refresh_gui()
-
+        self._refresh_recent_buttons()
     # ---------------- UI ----------------
     def _build_ui(self) -> None:
         W         = 320
@@ -574,15 +628,33 @@ class MacroRecorderApp:
         self._C_PLAY= C_PLAY
         self._C_PAUSE = C_PAUSE
 
+
+
         # Recording filter state (referenced by Settings popup)
-        self._moves_var = tk.IntVar(value=1)
-        self._keys_var  = tk.IntVar(value=1)
+        self._moves_var = tk.IntVar(value=self.record_mouse_inputs)
+        self._keys_var  = tk.IntVar(value=self.record_keyboard_inputs)
 
         # Behaviour settings
-        self._minimize_on_run_var = tk.IntVar(value=0)
-        self._use_touch_var = tk.IntVar(value=0)
+        self._minimize_on_run_var = tk.IntVar(value=self.minimize_on_run)
+        self._use_touch_var = tk.IntVar(value=self.use_touch_api)
+        
+        def _on_settings_change(*args):
+            self.state.set("settings","record_mouse_inputs",self._moves_var.get())
+            self.state.set("settings","record_keyboard_inputs",self._keys_var.get())
+            self.state.set("settings","use_touch_api",self._use_touch_var.get())
+            self.state.set("settings","minimize_on_run",self._minimize_on_run_var.get())
+            self.state.save()
+        
+        self._moves_var.trace_add("write", _on_settings_change)
+        self._keys_var.trace_add("write", _on_settings_change)
+        self._minimize_on_run_var.trace_add("write", _on_settings_change)
+        self._use_touch_var.trace_add("write", _on_settings_change)
+        
+        
         self._touch_mode = False       # plain bool, safe to read from hook thread
         self._touch_is_down = False    # tracks whether a touch contact is active
+
+
 
         root = self.root
         root.configure(bg=BG)
@@ -742,7 +814,7 @@ class MacroRecorderApp:
                      font=("Segoe UI", 6, "bold"),anchor="center").place(x=8, y=90, width=120, height=10)
         SPEEDS = [0.1,0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0,5.0,6.0,7.0,8.0,9.0,10.0,12.0,15.0,20.0,30.0,40.0,50.0,60.0,70.0,80.0,90.0,100.0]
         self._speeds    = SPEEDS
-        self._speed_idx = SPEEDS.index(1.0)
+        self._speed_idx = self.speed_index
 
         def spd_dec():
             self._speed_idx = max(0, self._speed_idx - 1)
@@ -751,28 +823,38 @@ class MacroRecorderApp:
             self._speed_idx = min(len(SPEEDS) - 1, self._speed_idx + 1)
             _upd_spd()
         def _upd_spd():
+            self.state.set("core","speed_index",self._speed_idx)
+            self.state.save()
             self._spd_lbl.config(text=f"{SPEEDS[self._speed_idx]:g}×")
+            
 
         place_btn(IF,  8, 102, 28, 22, "<", spd_dec, bg=SURF2, fg=MUTED2)
         self._spd_lbl = tk.Label(IF, text="1.0×", bg=SURF, fg=C_UI,
                                   font=("Consolas", 9, "bold"), anchor="center")
         self._spd_lbl.place(x=40, y=102, width=56, height=22)
         place_btn(IF, 100, 102, 28, 22, ">", spd_inc, bg=SURF2, fg=MUTED2)
-
+        _upd_spd()
         # Loop - custom flat toggle button (no OS checkbox widget)
-        self.loop_var = tk.IntVar(value=0)
+        self.loop_var = tk.IntVar(value=self.loop_replay) # loads from ini file
         self._loop_btn = tk.Button(IF, text="Loop", command=self._toggle_loop_btn,
                                     font=("Segoe UI", 8), bg=SURF2, fg=MUTED2,
                                     relief="flat", bd=0,
                                     activebackground=SURF, activeforeground=TEXT,
                                     cursor="hand2")
         self._loop_btn.place(x=140, y=102, width=52, height=22)
-
+        
         # Repeat count - labelled properly; hidden when loop is active
         self._repeat_lbl = tk.Label(IF, text="REPEAT", bg=BG, fg=MUTED2,
                                      font=("Segoe UI", 6, "bold"))
         self._repeat_lbl.place(x=195, y=90, width=60, height=10)
-        self._repeat_var = tk.StringVar(value="1")
+        
+        def _on_repeat_changed( *args):
+            value = self._repeat_var.get()
+            self.state.set("core","repeat_count",value)
+            self.state.save()
+            
+        self._repeat_var = tk.StringVar(value=self.repeat_count)
+        self._repeat_var.trace_add("write", _on_repeat_changed)
         self._repeat_entry = tk.Entry(IF, textvariable=self._repeat_var,
                                        bg=SURF, fg=TEXT, insertbackground=TEXT,
                                        relief="flat", font=("Consolas", 9),
@@ -781,7 +863,7 @@ class MacroRecorderApp:
         self._repeat_x_lbl = tk.Label(IF, text="×", bg=BG, fg=MUTED2,
                                        font=("Segoe UI", 8))
         self._repeat_x_lbl.place(x=246, y=104, width=12, height=16)
-
+        
         sep(IF, 130)
 
         # ·· FILES ····················································
@@ -799,7 +881,7 @@ class MacroRecorderApp:
 
         self._recent_btns = []
         for i in range(2):
-            rb = tk.Button(IF, text="-",
+            rb = tk.Button(IF, text="—",
                            command=lambda idx=i: self._load_recent(idx),
                            bg=BG, fg=MUTED2, relief="flat", bd=0,
                            font=("Segoe UI", 8), anchor="w",
@@ -853,7 +935,9 @@ class MacroRecorderApp:
         # -- Hotkeys --------------------------------------------------
         for key in ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9"]:
             root.bind_all(f"<{key}>", self._tk_hotkey_handler, add=True)
-
+        
+        self._sync_loop_btn()
+        
     def _tk_hotkey_handler(self, event):
         # We keep actual hotkeys in the low-level keyboard hook.
         return "break"
@@ -1384,6 +1468,8 @@ class MacroRecorderApp:
         with self.lock:
             self.loop_replay = not self.loop_replay
             self.loop_var.set(1 if self.loop_replay else 0)
+            self.state.set("core","loop_active",1 if self.loop_replay else 0)
+            self.state.save()
         self._sync_loop_btn()
         self.refresh_gui()
 
@@ -1447,20 +1533,10 @@ class MacroRecorderApp:
                 f.writelines(lines)
             self._add_recent(path)
 
-    def load_from_file(self) -> None:
-        with self.lock:
-            if self.recording or self.replaying:
-                messagebox.showwarning("Macro Recorder", "Stop recording/replay before loading.")
-                return
-            path = filedialog.askopenfilename(
-                title="Load Recording",
-                initialdir=os.path.dirname(__file__),
-                filetypes=[("Macro Files", "*.mcr")],
-            )
-            if not path:
-                return
-            actions = []
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+    def parse_file(self,file):
+        actions = []
+        try:
+            with open(file, "r", encoding="utf-8", errors="replace") as f:
                 for raw in f:
                     line = raw.rstrip("\r\n")
                     if not line:
@@ -1493,6 +1569,25 @@ class MacroRecorderApp:
             for a in actions:
                 abs_t += a["t"]
                 a["t"] = abs_t
+            return actions
+        except Exception as e:
+            return [] # failed to parse. they get nothing
+        return []
+
+    def load_from_file(self) -> None:
+        with self.lock:
+            if self.recording or self.replaying:
+                messagebox.showwarning("Macro Recorder", "Stop recording/replay before loading.")
+                return
+            path = filedialog.askopenfilename(
+                title="Load Recording",
+                initialdir=os.path.dirname(__file__),
+                filetypes=[("Macro Files", "*.mcr")],
+            )
+            if not path:
+                return
+            actions = self.parse_file(path)
+            
             self.actions = actions
         self._add_recent(path)
         self.refresh_gui()
@@ -1794,6 +1889,8 @@ class MacroRecorderApp:
             self.recent_files.remove(path)
         self.recent_files.insert(0, path)
         self.recent_files = self.recent_files[:2]
+        self.state.set_list("core","recent_files",self.recent_files)
+        self.state.save()
         self._refresh_recent_buttons()
 
     def _refresh_recent_buttons(self) -> None:
@@ -1815,35 +1912,8 @@ class MacroRecorderApp:
             if self.recording or self.replaying:
                 messagebox.showwarning("Macro Recorder", "Stop recording/replay before loading.")
                 return
-            # todo: This is a copy of load from file. This should get refactored later
-            actions = []
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                for raw in f:
-                    line = raw.rstrip("\r\n")
-                    if not line:
-                        continue
-                    cols = line.split("\t")
-                    t = cols[0]
-                    if t == "key" and len(cols) >= 4:
-                        actions.append({"type": "key", "key": cols[1], "down": cols[2] in ("1", "true", "True"), "t": int(float(cols[3]))})
-                    elif t == "mouse" and len(cols) >= 6:
-                        actions.append({"type": "mouse", "btn": cols[1], "down": cols[2] in ("1", "true", "True"), "x": int(float(cols[3])), "y": int(float(cols[4])), "t": int(float(cols[5]))})
-                    elif t == "wheel" and len(cols) >= 5:
-                        actions.append({"type": "wheel", "dir": cols[1], "x": int(float(cols[2])), "y": int(float(cols[3])), "t": int(float(cols[4]))})
-                    elif t == "move" and len(cols) >= 4:
-                        actions.append({"type": "move", "x": int(float(cols[1])), "y": int(float(cols[2])), "t": int(float(cols[3]))})
-                    elif t == "sleep" and len(cols) >= 2:
-                        val = cols[1]
-                        if val != "rand":
-                            try:
-                                val = int(float(val))
-                            except Exception:
-                                pass
-                        actions.append({"type": "sleep", "val": val, "t": int(float(cols[2])) if len(cols) >= 3 else 0})
-            abs_t = 0
-            for a in actions:
-                abs_t += a["t"]
-                a["t"] = abs_t
+
+            actions = self.parse_file(path)
             self.actions = actions
         self.refresh_gui()
 
@@ -1864,12 +1934,205 @@ class MacroRecorderApp:
         self.root.mainloop()
 
 
+# --------- INI manager code ------------
+# This should be in a new file but I want to keep this as a 1 file project for portability. 
+
+import configparser
+import os
+from pathlib import Path
+from typing import Any
+import json
+ 
+class AppStateManager:
+    """
+    Manages application state persistence using an INI file.
+ 
+    Wraps Python's configparser with typed getters, auto-save on context
+    exit, and safe defaults so missing keys never crash your app.
+    """
+ 
+    def __init__(self, filepath: str = "app_state.ini", auto_load: bool = True):
+        """
+        Args:
+            filepath:  Path to the INI file (created if it doesn't exist).
+            auto_load: If True, load existing state immediately on init.
+        """
+        self.filepath = Path(filepath)
+        self._config = configparser.ConfigParser()
+        if auto_load:
+            self.load()
+ 
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+ 
+    def load(self) -> bool:
+        """
+        Load state from disk.
+ 
+        Returns:
+            True if the file was found and read; False if it didn't exist yet.
+        """
+        if not self.filepath.exists():
+            return False
+        self._config.read(self.filepath, encoding="utf-8")
+        return True
+ 
+    def save(self) -> None:
+        """Write current state to disk, creating parent directories as needed."""
+        self.filepath.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.filepath, "w", encoding="utf-8") as f:
+            self._config.write(f)
+ 
+    def delete(self) -> bool:
+        """
+        Delete the INI file and reset in-memory state.
+ 
+        Returns:
+            True if the file was deleted; False if it didn't exist.
+        """
+        self._config = configparser.ConfigParser()
+        if self.filepath.exists():
+            os.remove(self.filepath)
+            return True
+        return False
+ 
+    # ------------------------------------------------------------------
+    # Context manager  (with AppStateManager(...) as state:)
+    # ------------------------------------------------------------------
+ 
+    def __enter__(self) -> "AppStateManager":
+        return self
+ 
+    def __exit__(self, *_) -> None:
+        self.save()
+ 
+    # ------------------------------------------------------------------
+    # Write
+    # ------------------------------------------------------------------
+ 
+    def set(self, section: str, key: str, value: Any) -> None:
+        """
+        Store a value under [section] / key.
+        The value is coerced to a string (booleans become "true"/"false").
+ 
+        Args:
+            section: INI section name (created automatically if absent).
+            key:     Option name within the section.
+            value:   Any value — converted to str for storage.
+        """
+        if not self._config.has_section(section):
+            self._config.add_section(section)
+        # Normalise booleans so get_bool() can reliably round-trip them
+        if isinstance(value, bool):
+            self._config.set(section, key, "true" if value else "false")
+        else:
+            self._config.set(section, key, str(value))
+ 
+    def set_list(self, section: str, key: str, value: list) -> None:
+        self.set(section, key, json.dumps(value))
+
+    def remove_key(self, section: str, key: str) -> bool:
+        """Remove a single key. Returns True if it existed."""
+        return self._config.has_option(section, key) and self._config.remove_option(section, key)
+ 
+    def remove_section(self, section: str) -> bool:
+        """Remove an entire section. Returns True if it existed."""
+        return self._config.remove_section(section)
+ 
+    # ------------------------------------------------------------------
+    # Read — typed getters
+    # ------------------------------------------------------------------
+ 
+    def get(self, section: str, key: str, fallback: str = "") -> str:
+        """Return a value as a string, or *fallback* if not found."""
+        return self._config.get(section, key, fallback=fallback)
+ 
+    def get_int(self, section: str, key: str, fallback: int = 0) -> int:
+        """Return a value as an int, or *fallback* if not found / not numeric."""
+        try:
+            return self._config.getint(section, key, fallback=fallback)
+        except ValueError:
+            return fallback
+ 
+    def get_float(self, section: str, key: str, fallback: float = 0.0) -> float:
+        """Return a value as a float, or *fallback* if not found / not numeric."""
+        try:
+            return self._config.getfloat(section, key, fallback=fallback)
+        except ValueError:
+            return fallback
+ 
+    def get_bool(self, section: str, key: str, fallback: bool = False) -> bool:
+        """
+        Return a value as a bool.
+        Recognises: true/false, yes/no, on/off, 1/0 (case-insensitive).
+        Returns *fallback* if key is absent or value is unrecognised.
+        """
+        try:
+            return self._config.getboolean(section, key, fallback=fallback)
+        except ValueError:
+            return fallback
+
+    def get_list(self, section: str, key: str, fallback: list = []) -> list:
+        raw = self.get(section, key, fallback=None)
+        if raw is None:
+            return fallback
+        try:
+            result = json.loads(raw)
+            return result if isinstance(result, list) else fallback
+        except (json.JSONDecodeError, ValueError):
+            return fallback 
+    # ------------------------------------------------------------------
+    # Introspection helpers
+    # ------------------------------------------------------------------
+ 
+    def has(self, section: str, key: str) -> bool:
+        """Return True if [section] / key exists."""
+        return self._config.has_option(section, key)
+ 
+    def sections(self) -> list[str]:
+        """Return a list of all section names."""
+        return self._config.sections()
+ 
+    def keys(self, section: str) -> list[str]:
+        """Return all keys within a section (empty list if section missing)."""
+        if not self._config.has_section(section):
+            return []
+        return list(self._config.options(section))
+ 
+    def as_dict(self) -> dict[str, dict[str, str]]:
+        """Return the entire state as a plain nested dict."""
+        return {s: dict(self._config.items(s)) for s in self._config.sections()}
+ 
+    def __repr__(self) -> str:
+        return f"AppStateManager(filepath={str(self.filepath)!r}, sections={self.sections()})"
+ 
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
 if __name__ == "__main__":
+    os.system('color')
+    print("Rename .py with .pyw to remove the console.\nAlternatively, Use the executable version at:\n"+"\033[91m"+"https://github.com/000744210/FastMacro"+"\033[0m")
     try:
         # Force Windows timer resolution to 1ms
         winmm.timeBeginPeriod(1)
         
-        app = MacroRecorderApp()
+        opened_file = None
+        if len(sys.argv) > 1:
+            opened_file = sys.argv[1]
+        register_mcr_filetype()
+        app = MacroRecorderApp(opened_file)
         app.run()
         
     finally:
