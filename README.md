@@ -34,6 +34,8 @@ Replace your clicks with the windows Touch API. (Not a 1:1 record to playback ac
 # Download
 Use either the FastMacro.exe or FastMacro.py. Both are the same application with the exception that the executable doesn't require python installed. 
 
+If using the python version. No pip installs required. All using built in libraries. I recommend renaming .py to .pyw to not have a console.
+
 # How to compile python to exe. (Optional)
 Requirements. 
 - pip install nuitka
