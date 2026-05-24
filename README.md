@@ -1,8 +1,8 @@
 # FastMacro
 A fast and accurate mouse/keyboard recording and playback application.
 
-Keypresses have a submillisecond level accuracy during playback.
-Clicks have a +-5 millisecond level accuracy during playback.
+Keypresses have a submillisecond level of accuracy during playback.
+Clicks have a +-5 millisecond level of accuracy during playback.
 
 <img width="319" height="266" alt="{8D665106-EA52-4A08-BF5B-2287B7E28FD1}" src="https://github.com/user-attachments/assets/2ab97bb9-1c8e-49d9-87b6-6e6a5777aaa9" />
 
