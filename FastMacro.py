@@ -867,7 +867,7 @@ class MacroRecorderApp:
         sep(IF, 130)
 
         # ·· FILES ····················································
-        # Save / Load share the row; Clear is muted (not red); Settings gone from here
+        
         place_btn(IF,   8, 136, 100, 24, "Save  F6", self.save_to_file)
         place_btn(IF, 112, 136, 100, 24, "Load  F7", self.load_from_file)
         place_btn(IF, 216, 136,  96, 24, "Clear",    self.clear_recording,
