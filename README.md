@@ -39,7 +39,7 @@ If using the python version. No pip installs required. All using built in librar
 # How to compile python to exe. (Optional)
 Requirements. 
 - pip install nuitka
-- Desktop Developement with C++ (MSVC v143 checked) https://visualstudio.microsoft.com/downloads/?q=build+tools
+- Desktop Developement with C++ (MSVC v143 checked) [Visual cpp build tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
 ```bash
 nuitka --standalone --onefile --windows-console-mode=disable --msvc=latest --enable-plugin=tk-inter --lto=yes --windows-icon-from-ico=icon.png --python-flag=-O "FastMacro.py"
 ```
