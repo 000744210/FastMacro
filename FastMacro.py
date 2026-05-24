@@ -579,6 +579,9 @@ class MacroRecorderApp:
         self.repeat_count = state.get("core","repeat_count",fallback="1")
         self.speed_index = state.get_int("core","speed_index",fallback=4) # 4 = x1 speed
         
+        
+        
+        
         self.record_mouse_inputs = state.get_int("settings","record_mouse_inputs",fallback=1)
         self.record_keyboard_inputs = state.get_int("settings","record_keyboard_inputs",fallback=1)
         self.use_touch_api = state.get_int("settings","use_touch_api",fallback=0)
@@ -593,7 +596,9 @@ class MacroRecorderApp:
         if opened_file:
             self.actions = self.parse_file(opened_file)
             self._add_recent(opened_file)
-        
+        else:
+            print("getting actions",state.get_list("core","actions",fallback=[]))
+            self.actions = state.get_list("core","actions",fallback=[])
         self.refresh_gui()
         self._refresh_recent_buttons()
     # ---------------- UI ----------------
@@ -867,7 +872,6 @@ class MacroRecorderApp:
         sep(IF, 130)
 
         # ·· FILES ····················································
-        
         place_btn(IF,   8, 136, 100, 24, "Save  F6", self.save_to_file)
         place_btn(IF, 112, 136, 100, 24, "Load  F7", self.load_from_file)
         place_btn(IF, 216, 136,  96, 24, "Clear",    self.clear_recording,
@@ -1189,6 +1193,8 @@ class MacroRecorderApp:
             self.recording = False
             self.record_paused = False
             self.held_keys = set()
+            self.state.set_list("core","actions",self.actions)
+            self.state.save()
         self.refresh_gui()
         if self._minimize_on_run_var.get():
             self._restore_window()
@@ -1198,6 +1204,8 @@ class MacroRecorderApp:
             if self.recording or self.replaying:
                 return
             self.actions = []
+            self.state.set_list("core","actions",self.actions)
+            self.state.save()
         self.refresh_gui()
 
     def toggle_pause_recording(self) -> None:
@@ -1589,6 +1597,8 @@ class MacroRecorderApp:
             actions = self.parse_file(path)
             
             self.actions = actions
+            self.state.set_list("core","actions",self.actions)
+            self.state.save()
         self._add_recent(path)
         self.refresh_gui()
 
@@ -1957,7 +1967,7 @@ class AppStateManager:
             filepath:  Path to the INI file (created if it doesn't exist).
             auto_load: If True, load existing state immediately on init.
         """
-        self.filepath = Path(filepath)
+        self.filepath = Path(self._get_state_path())
         self._config = configparser.ConfigParser()
         if auto_load:
             self.load()
@@ -2030,6 +2040,7 @@ class AppStateManager:
             self._config.set(section, key, str(value))
  
     def set_list(self, section: str, key: str, value: list) -> None:
+        print(json.dumps(value))
         self.set(section, key, json.dumps(value))
 
     def remove_key(self, section: str, key: str) -> bool:
@@ -2085,6 +2096,19 @@ class AppStateManager:
     # ------------------------------------------------------------------
     # Introspection helpers
     # ------------------------------------------------------------------
+
+    def _get_state_path(self) -> Path:
+        
+        exe_path = os.path.abspath(sys.argv[0])
+        if exe_path[-3:] == "exe":
+            # Running as a compiled exe  use %APPDATA%\FastMacro\FastMacro.ini
+            base = Path(os.environ["APPDATA"]) / "FastMacro"
+        else:
+            # Running as a script — use a local file for dev convenience
+            base = Path(__file__).parent
+        print("ini located:",base)
+        base.mkdir(parents=True, exist_ok=True)
+        return base / "FastMacro.ini"
  
     def has(self, section: str, key: str) -> bool:
         """Return True if [section] / key exists."""
