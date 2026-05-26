@@ -1,4 +1,5 @@
 import ctypes
+from ctypes import wintypes
 import os
 import sys
 import queue
@@ -569,8 +570,8 @@ class MacroRecorderApp:
         self._mouse_hook = None
         self._keyboard_proc_ref = LowLevelKeyboardProc(self._keyboard_proc)
         self._mouse_proc_ref = LowLevelMouseProc(self._mouse_proc)
-
-
+        threading.Thread(target=self._pipe_listener, daemon=True).start()
+    
         
         state = AppStateManager("FastMacro.ini")
         self.state = state
@@ -1098,6 +1099,29 @@ class MacroRecorderApp:
             wParam,
             lParam
         )
+    
+    # used to prevent multiple instances from being opened. Also allows opening mcr files with an instance already opened.
+    def _pipe_listener(self):
+        PIPE_NAME  = r"\\.\pipe\FastMacro"
+        kernel32   = ctypes.WinDLL("kernel32", use_last_error=True)
+        while True:
+            pipe = kernel32.CreateNamedPipeW(
+                PIPE_NAME, 0x00000001, 0x00000000 | 0x00000000, 1, 4096, 4096, 0, None
+            )
+            if pipe == -1:
+                print("breaking")
+                break
+            kernel32.ConnectNamedPipe(pipe, None)
+            buf  = ctypes.create_string_buffer(4096)
+            read = ctypes.c_ulong(0)
+            kernel32.ReadFile(pipe, buf, 4096, ctypes.byref(read), None)
+            kernel32.CloseHandle(pipe)
+            path = buf.raw[:read.value].decode("utf-16-le").strip()
+            def load_file(file):
+                self.actions = self.parse_file(file)
+                self._add_recent(file)
+            if path:
+                self.root.after(0, lambda p=path: load_file(p))
 
     # -------------- queue --------------
     def _schedule_queue_pump(self):
@@ -2130,19 +2154,6 @@ class AppStateManager:
  
     def __repr__(self) -> str:
         return f"AppStateManager(filepath={str(self.filepath)!r}, sections={self.sections()})"
- 
- 
-
-
-
-
-
-
-
-
-
-
-
 
 
 if __name__ == "__main__":
@@ -2151,14 +2162,34 @@ if __name__ == "__main__":
     try:
         # Force Windows timer resolution to 1ms
         winmm.timeBeginPeriod(1)
-        
+
+        # --- Single instance via named mutex + named pipe
+        MUTEX_NAME = "FastMacro_SingleInstance"
+        PIPE_NAME  = r"\\.\pipe\FastMacro"
+        kernel32   = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        kernel32.CreateMutexW(None, False, MUTEX_NAME)
+        already_running = (ctypes.get_last_error() == 183)  # ERROR_ALREADY_EXISTS
+
+        if already_running:
+            print("already running")
+            if len(sys.argv) > 1:
+                print(sys.argv[1])
+                pipe = kernel32.CreateFileW(PIPE_NAME, 0x40000000, 0, None, 3, 0, None)
+                if pipe != -1:
+                    print("pipe exists")
+                    data = sys.argv[1].encode("utf-16-le")
+                    written = ctypes.c_ulong(0)
+                    kernel32.WriteFile(pipe, data, len(data), ctypes.byref(written), None)
+                    kernel32.CloseHandle(pipe)
+            sys.exit(0)
+
         opened_file = None
         if len(sys.argv) > 1:
             opened_file = sys.argv[1]
         register_mcr_filetype()
         app = MacroRecorderApp(opened_file)
         app.run()
-        
+
     finally:
-        # Always restore system timer resolution on exit
         winmm.timeEndPeriod(1)
